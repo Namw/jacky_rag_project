@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+data/
+models/BAAI-bge-reranker-large
+models/models--BAAI--bge-large-zh-v1.5
+models/model_paths.py
