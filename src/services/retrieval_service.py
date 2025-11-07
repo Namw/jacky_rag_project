@@ -4,40 +4,27 @@
 documents.py（测试）和 chat.py（实际使用）都调用这个
 """
 
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
-from sentence_transformers import CrossEncoder
-from langchain_huggingface import HuggingFaceEmbeddings
 from pathlib import Path
+
+from models.model_factory_ebd import ModelFactoryEbd
 
 CHROMA_PERMANENT_DIR = Path("data/vectorstore/permanent")  # 正式库
 
-# 全局 reranker（与 documents.py 一致）
-try:
-    from models.model_paths import get_models_cache_dir
+# ==================== 全局模型实例（懒加载）====================
+print(f"🔧 当前模型提供商: {ModelFactoryEbd.get_provider()}")
 
-    reranker_model = CrossEncoder(
-        model_name_or_path=get_models_cache_dir() + '/BAAI-bge-reranker-large',
-        max_length=512,
-        device='cpu'
-    )
-    print("✅ Reranker模型加载成功")
-except Exception as e:
-    print(f"⚠️ Reranker模型加载失败: {e}")
-    reranker_model = None
+def get_embedding_model():
+    """获取 Embedding 模型"""
+    return ModelFactoryEbd.get_embedding_model()
 
-# 初始化embedding模型（全局共享）
-print("📦 初始化 Embedding 模型...")
-embedding_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-large-zh-v1.5",
-    cache_folder=get_models_cache_dir(),
-    model_kwargs={
-        "device": "cpu",
-        "local_files_only": True
-    }
-)
-print("✅ Embedding 模型加载成功")
+
+def get_reranker_model():
+    """获取 Reranker 模型"""
+    return ModelFactoryEbd.get_reranker_model()
+
 
 def retrieve_with_rerank(
         vectorstore: Chroma,
@@ -89,7 +76,9 @@ def _rerank_results(
         results: List[Tuple[Document, float]],
         top_k: int
 ) -> List[Tuple[Document, float]]:
-    """使用 BGE reranker 进行二次精排"""
+    """使用 Reranker 进行二次精排（兼容本地和阿里云模型）"""
+
+    reranker_model = get_reranker_model()
 
     if reranker_model is None:
         print("⚠️ Reranker 不可用，返回原始结果")
@@ -99,7 +88,7 @@ def _rerank_results(
         # 准备 query-document 对
         pairs = [[query, doc.page_content] for doc, _ in results]
 
-        # 计算 rerank 分数
+        # 计算 rerank 分数（统一接口）
         rerank_scores = reranker_model.predict(pairs)
 
         # 更新分数并重新排序
@@ -115,3 +104,5 @@ def _rerank_results(
     except Exception as e:
         print(f"⚠️ Rerank 失败: {e}")
         return results[:top_k]
+
+embedding_model = get_embedding_model()

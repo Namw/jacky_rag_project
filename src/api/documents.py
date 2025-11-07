@@ -53,17 +53,6 @@ class Document:
         self.permanent_collection_name = None  # 正式库collection名称
         self.confirmed_at = None  # 确认时间
 
-try:
-    reranker_model = CrossEncoder(
-        model_name_or_path = get_models_cache_dir() + '/BAAI-bge-reranker-large',
-        max_length=512,
-        device='cpu'
-    )
-    print("✅ Reranker模型加载成功")
-except Exception as e:
-    print(f"⚠️ Reranker模型加载失败: {e}")
-    reranker_model = None
-
 def cleanup_temp_collection(collection_name: str):
     """删除Chroma临时collection"""
     try:
@@ -226,35 +215,6 @@ def split_text_with_overlap(text: str, chunk_size: int, overlap: int, separator:
             break
 
     return chunks
-
-async def rerank_results(query: str, results: List[dict], top_k: int) -> List[dict]:
-    """使用BGE reranker模型进行二次精排"""
-
-    # 检查reranker是否可用
-    if reranker_model is None:
-        print("⚠️ Reranker不可用，返回原始结果")
-        return results[:top_k]
-
-    try:
-        # 准备query-document对
-        pairs = [[query, item['content']] for item in results]
-
-        # 计算rerank分数
-        rerank_scores = reranker_model.predict(pairs)
-
-        # 更新相似度分数
-        for i, item in enumerate(results):
-            item['similarity_score'] = round(float(rerank_scores[i]), 4)
-
-        # 按rerank分数降序排序
-        results.sort(key=lambda x: x['similarity_score'], reverse=True)
-
-        return results[:top_k]
-
-    except Exception as e:
-        print(f"⚠️ Rerank失败: {e}")
-        return results[:top_k]
-
 
 def extract_category_from_chunks(chunks: List[dict], max_chunks: int = 3) -> str:
     """
