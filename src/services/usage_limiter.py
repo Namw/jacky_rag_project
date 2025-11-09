@@ -27,8 +27,6 @@ class UsageLimitsConfig:
     REDIS_KEY_CONFIG_UPLOAD = "config:limits:upload"
     REDIS_KEY_CONFIG_QUERY = "config:limits:query"
 
-usage_limits_config = UsageLimitsConfig()
-
 class UsageLimiter:
     """使用限额管理器"""
 
@@ -39,7 +37,7 @@ class UsageLimiter:
         :param redis_client: Redis 客户端
         """
         self.redis = redis_client
-        self.config = usage_limits_config
+        self.config = UsageLimitsConfig()
 
         # 初始化默认配置
         self._init_config()

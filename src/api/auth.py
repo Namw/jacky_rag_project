@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -36,7 +38,7 @@ def _init_fake_user_db():
 fake_user_db = None
 
 # JWT 配置
-SECRET_KEY = "jacky_mcp_rag_20251101"  # ⭐️ 必须换成你自己的私钥!
+SECRET_KEY =os.getenv("JWT_SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
