@@ -12,6 +12,5 @@ wheels/
 data/
 models/BAAI-bge-reranker-large
 models/models--BAAI--bge-large-zh-v1.5
-models/model_paths.py
 tests/
 other_md/
