@@ -1,9 +1,10 @@
 from fastapi import UploadFile, File, HTTPException, APIRouter, Depends
 from fastapi.responses import JSONResponse
 from langchain_chroma import Chroma
+from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from sentence_transformers import CrossEncoder
+import re
 import uuid
 import os
 from pathlib import Path
@@ -11,8 +12,9 @@ from datetime import datetime
 import fitz  # PyMuPDF
 import time
 import chromadb
-from models.model_paths import get_models_cache_dir
 from src.api.auth import get_current_user, User
+from src.api.chat import get_llm
+from src.services.chroma_cleanup import delete_collection_completely
 from src.services.retrieval_service import retrieve_with_rerank, embedding_model, CHROMA_PERMANENT_DIR
 from src.services.vector_store_cache import vectorstore_cache
 
@@ -52,15 +54,21 @@ class Document:
         self.chroma_collection_name = None
         self.permanent_collection_name = None  # 正式库collection名称
         self.confirmed_at = None  # 确认时间
+        self.category = None
+        self.page_char_ranges = None
+
+
 
 def cleanup_temp_collection(collection_name: str):
-    """删除Chroma临时collection"""
-    try:
-        client = chromadb.PersistentClient(path=str(CHROMA_TEMP_DIR))
-        client.delete_collection(name=collection_name)
-        print(f"🗑️ 删除临时collection: {collection_name}")
-    except Exception as e:
-        print(f"⚠️ 删除collection失败 {collection_name}: {e}")
+    """删除Chroma临时collection（包括物理文件）"""
+    delete_result = delete_collection_completely(
+        collection_name=collection_name,
+        persist_dir=str(CHROMA_TEMP_DIR),
+        verbose=True
+    )
+
+    if not delete_result["collection_deleted"]:
+        print(f"⚠️ 删除临时collection失败: {collection_name}")
 
 
 def verify_document_ownership(document_id: str, user_id: str):
@@ -103,6 +111,7 @@ class ChunkResponse(BaseModel):
     total_chars: int
     chunk_size: int
     overlap: int
+    category: str
 
 
 class VectorizeResponse(BaseModel):
@@ -120,7 +129,7 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20, description="返回top-k个最相关的chunks")
     threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="相似度阈值（可选）")
     use_rerank: bool = Field(default=False, description="是否启用rerank二次精排")  # 新增 ⭐️
-
+    filter_category: Optional[str] = Field(default=None, description="按分类过滤（可选）")  # 👈 新增
 
 class SearchResultItem(BaseModel):
     """单个搜索结果"""
@@ -160,7 +169,6 @@ class PermanentChunkItem(BaseModel):
     start_pos: int
     end_pos: int
     metadata: dict
-
 
 class PermanentDocumentResponse(BaseModel):
     """正式库文档查看响应"""
@@ -216,36 +224,102 @@ def split_text_with_overlap(text: str, chunk_size: int, overlap: int, separator:
 
     return chunks
 
-def extract_category_from_chunks(chunks: List[dict], max_chunks: int = 3) -> str:
+def extract_category_from_chunks(
+        chunks: List[dict],
+        max_chunks: int = 3
+) -> str:  # 👈 注意：返回值改为 str，而不是 dict
     """
-    从前几个chunk提取文档分类（关键词匹配）
+    使用 LLM 进行文档分类（返回分类名称字符串）
+
+    :param chunks: 文档块列表
+    :param max_chunks: 使用前几个chunk进行分类
+    :return: 分类名称字符串
     """
-    # 合并前几个chunk的内容
-    sample_text = " ".join([chunk["content"] for chunk in chunks[:max_chunks]])
+    llm = get_llm()
 
-    # 关键词匹配规则（可以根据实际情况调整）
-    rules = {
-        "简历": ["简历", "工作经验", "教育背景", "求职意向", "个人信息", "技能特长"],
-        "劳动合同": ["劳动合同", "甲方", "乙方", "合同编号", "签订日期", "合同期限"],
-        "公司管理制度": ["管理制度", "规章制度", "第一章", "总则", "第一条", "员工守则"],
-        "财务报表": ["资产负债表", "利润表", "现金流量", "财务报表", "会计期间"],
-        "会议纪要": ["会议纪要", "参会人员", "会议时间", "会议议题", "决议事项"]
-    }
+    # 提取样本文本（限制长度避免token过多）
+    sample_text = "\n".join([
+        f"片段{i + 1}: {chunk['content'][:300]}"  # 每个chunk只取300字
+        for i, chunk in enumerate(chunks[:max_chunks])
+    ])
 
-    # 计算每个分类的匹配分数
-    category_scores = {}
-    for category, keywords in rules.items():
-        score = sum(1 for keyword in keywords if keyword in sample_text)
-        category_scores[category] = score
+    # System Prompt - 自由分类模式
+    system_prompt = """你是一个专业的文档分类助手。
+你的任务是根据文档内容，为其确定一个恰当的分类标签。
 
-    # 找到得分最高的分类
-    best_category = max(category_scores.items(), key=lambda x: x[1])
+分类要求：
+1. 仔细阅读文档片段，理解其核心内容、用途和性质
+2. 给出一个简洁、准确的分类名称（2-6个字）
+3. 分类应该是通用的、标准的类型
 
-    # 如果得分为0，说明都没匹配到
-    if best_category[1] == 0:
-        return "其他文档"
+常见文档类型参考（但不限于）：
+- 人事类：简历、入职登记表、离职申请、员工花名册
+- 法务类：劳动合同、保密协议、承诺书、授权委托书
+- 管理类：管理制度、操作规程、工作流程、通知公告
+- 财务类：财务报表、发票、收据、报销单
+- 项目类：项目方案、技术文档、需求文档、测试报告
+- 会议类：会议纪要、会议通知、会议议程
 
-    return best_category[0]
+请仔细分析文档内容后，只返回一个最合适的分类名称，不要有其他内容。
+例如：简历、劳动合同、管理制度、会议纪要等。"""
+
+    user_prompt = f"""请对以下文档进行分类，只返回分类名称（2-6个字）：
+
+{sample_text}
+
+分类名称："""
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt)
+    ]
+
+    try:
+        response = llm.invoke(messages)
+        category = response.content.strip()
+
+        # 清理可能的多余内容
+        # 移除可能的标点符号、引号等
+        category = category.replace('"', '').replace("'", "").replace('。', '').strip()
+
+        # 如果返回内容过长，尝试提取第一个有效分类词
+        if len(category) > 10:
+            # 尝试匹配常见模式
+            match = re.search(
+                r'(简历|合同|制度|报表|纪要|方案|文档|协议|通知|申请|登记|承诺书|委托书|报销单|发票|收据)', category)
+            if match:
+                category = match.group(1)
+            else:
+                category = category[:6]  # 截取前6个字
+
+        # 如果为空，返回默认值
+        if not category:
+            category = "其他文档"
+
+        return category
+
+    except Exception as e:
+        print(f"LLM分类失败: {str(e)}")
+        return "未分类"  # 👈 错误时返回默认字符串
+
+
+def get_page_numbers(start_pos: int, end_pos: int, page_char_ranges: List[dict]) -> List[int]:
+    """
+    根据字符范围确定所有涉及的页码
+
+    返回: [1, 2] 表示分块跨越第1页和第2页
+    """
+    pages = set()
+
+    for page_info in page_char_ranges:
+        page_start = page_info["start_char"]
+        page_end = page_info["end_char"]
+
+        # 判断分块与页面是否有重叠
+        if not (end_pos <= page_start or start_pos >= page_end):
+            pages.add(page_info["page_num"])
+
+    return sorted(list(pages))
 
 # ==================== API Endpoints ====================
 
@@ -279,8 +353,21 @@ async def upload_document(
         page_count = doc_pdf.page_count
 
         text_content = ""
-        for page in doc_pdf:
-            text_content += page.get_text() + "\n"
+        page_char_ranges = []
+
+        for page_num in range(page_count):
+            page = doc_pdf[page_num]
+            page_text = page.get_text()
+
+            start_char = len(text_content)
+            text_content += page_text + "\n"
+            end_char = len(text_content)
+
+            page_char_ranges.append({
+                "page_num": page_num + 1,  # 页码从1开始
+                "start_char": start_char,
+                "end_char": end_char
+            })
 
         doc_pdf.close()
 
@@ -302,6 +389,7 @@ async def upload_document(
         user_id=current_user.username  # 使用 username
     )
     doc.text_content = text_content
+    doc.page_char_ranges = page_char_ranges  # 👈 保存页码映射
 
     documents_db[document_id] = doc
 
@@ -400,7 +488,13 @@ async def vectorize_document(
             "char_count": chunk["char_count"],
             "start_pos": chunk["start_pos"],
             "end_pos": chunk["end_pos"],
-            "document_id": document_id
+            "page_numbers": ",".join(map(str, get_page_numbers(
+                chunk["start_pos"],
+                chunk["end_pos"],
+                doc.page_char_ranges
+            ))),
+            "document_id": document_id,
+            "category": doc.category if doc.category else "未分类"
         }
         for chunk in doc.chunks
     ]
@@ -546,8 +640,8 @@ async def confirm_document(
 
         permanent_client = chromadb.PersistentClient(path=str(CHROMA_PERMANENT_DIR))
 
-        # 删除已存在的同名collection（如果有）
         try:
+            # 删除已存在的同名collection（如果有）
             permanent_client.delete_collection(name=permanent_collection_name)
         except:
             pass

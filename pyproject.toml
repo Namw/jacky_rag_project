@@ -23,5 +23,6 @@ dependencies = [
     "pymupdf>=1.26.5",
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.20",
+    "redis>=7.0.1",
     "sentence-transformers>=5.1.2",
 ]

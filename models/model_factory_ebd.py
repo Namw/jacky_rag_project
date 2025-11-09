@@ -5,15 +5,11 @@
 
 import os
 import dashscope
-from dotenv import load_dotenv
 from dashscope import TextReRank
 from langchain_huggingface import HuggingFaceEmbeddings
 from sentence_transformers import CrossEncoder
 from models.model_paths import get_models_cache_dir
 from langchain_community.embeddings import DashScopeEmbeddings
-
-load_dotenv()
-
 
 class ModelFactoryEbd:
     """模型工厂类，根据配置加载对应的模型"""
@@ -24,7 +20,7 @@ class ModelFactoryEbd:
     @staticmethod
     def get_provider() -> str:
         """获取当前模型提供商"""
-        return os.getenv("MODEL_PROVIDER", "local").lower()
+        return os.getenv("MODEL_PROVIDER", "aliyun").lower()
 
     @staticmethod
     def get_embedding_model():

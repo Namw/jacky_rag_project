@@ -3,12 +3,12 @@
 统一的召回服务
 documents.py（测试）和 chat.py（实际使用）都调用这个
 """
-
+import redis
 from typing import List, Tuple, Optional
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 from pathlib import Path
-
+from src.services.semantic_cache import SemanticQueryCache
 from models.model_factory_ebd import ModelFactoryEbd
 
 CHROMA_PERMANENT_DIR = Path("data/vectorstore/permanent")  # 正式库
@@ -20,11 +20,91 @@ def get_embedding_model():
     """获取 Embedding 模型"""
     return ModelFactoryEbd.get_embedding_model()
 
-
 def get_reranker_model():
     """获取 Reranker 模型"""
     return ModelFactoryEbd.get_reranker_model()
 
+_semantic_cache: Optional[SemanticQueryCache] = None
+
+def init_semantic_cache(
+        redis_client: redis.Redis,
+        similarity_threshold: float = 0.95,
+        ttl_hours: int = 24
+    ):
+    """初始化语义缓存（需要在应用启动时调用）"""
+    global _semantic_cache
+    embedding_model = get_embedding_model()
+    _semantic_cache = SemanticQueryCache(
+        redis_client=redis_client,
+        embedding_model=embedding_model,
+        similarity_threshold=similarity_threshold,  # 可以调整
+        ttl_hours=ttl_hours
+    )
+    print("✅ 语义缓存初始化成功")
+
+def get_semantic_cache() -> Optional[SemanticQueryCache]:
+    """获取语义缓存实例"""
+    return _semantic_cache
+
+def retrieve_with_cache(
+        vectorstore: Chroma,
+        query: str,
+        collection_name: str,  # 👈 改为 collection_name，必传
+        top_k: int = 5,
+        use_rerank: bool = False,
+        threshold: Optional[float] = None
+) -> List[Tuple[Document, float]]:
+    """
+    带语义缓存的检索函数
+
+    :param vectorstore: Chroma 向量库实例
+    :param query: 查询文本
+    :param collection_name: Collection 名称（用于缓存隔离）
+    :param top_k: 返回 top-k 结果
+    :param use_rerank: 是否启用 rerank
+    :param threshold: 相似度阈值
+    :return: [(Document, score), ...]
+    """
+    cache = get_semantic_cache()
+
+    # 1. 尝试从缓存获取
+    if cache:
+        cached_results = cache.get(
+            query=query,
+            collection_name=collection_name,
+            top_k=top_k,
+            use_rerank=use_rerank
+        )
+
+        if cached_results is not None:
+            # 应用 threshold 过滤（如果需要）
+            if threshold is not None:
+                cached_results = [
+                    (doc, score) for doc, score in cached_results
+                    if score >= threshold
+                ]
+            return cached_results
+
+    # 2. 缓存未命中，执行真实检索
+    results = retrieve_with_rerank(
+        vectorstore=vectorstore,
+        query=query,
+        top_k=top_k,
+        use_rerank=use_rerank,
+        threshold=threshold
+    )
+
+    # 3. 存入缓存
+    if cache and results:
+        cache.set(
+            query=query,
+            collection_name=collection_name,
+            top_k=top_k,
+            use_rerank=use_rerank,
+            results=results
+        )
+
+    return results
 
 def retrieve_with_rerank(
         vectorstore: Chroma,
@@ -51,7 +131,7 @@ def retrieve_with_rerank(
         query,
         k=initial_k
     )
-
+    # print(f"检索的文本分类：{results_with_scores[0][0].metadata['category']}")
     # 2. 转换为统一格式（distance → similarity）
     results = []
     for doc, distance in results_with_scores:
@@ -69,7 +149,6 @@ def retrieve_with_rerank(
 
     # 4. 返回 top_k 个结果
     return results[:top_k]
-
 
 def _rerank_results(
         query: str,

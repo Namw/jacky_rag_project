@@ -4,20 +4,18 @@ from typing import Optional, List, Tuple
 from datetime import datetime
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-
+from src.services.retrieval_service import get_semantic_cache
 from src.services.vector_store_cache import vectorstore_cache
 from src.vectorstore.chroma_store import VectorStoreManager
 from models.model_factory import ModelFactory
 from config.model_config import ModelProvider
 from src.api.auth import get_current_user, User
-from dotenv import load_dotenv
-from src.services.retrieval_service import retrieve_with_rerank
+from src.services.retrieval_service import retrieve_with_cache
 from langchain_core.documents import Document
 
 # --- 1. 全局变量和配置 ---
 
 # 向量数据库和 LLM 实例（延迟初始化）
-load_dotenv()
 _vectorstore: Optional[VectorStoreManager] = None
 _llm: Optional[ChatOpenAI] = None
 _current_provider: ModelProvider = ModelProvider.DEEPSEEK
@@ -168,9 +166,10 @@ def retrieve_documents(
         try:
             vectorstore = _vectorstore_cache.get(collection_name)
 
-            results = retrieve_with_rerank(
+            results = retrieve_with_cache(
                 vectorstore=vectorstore,
                 query=query,
+                collection_name=collection_name,
                 top_k=k,
                 use_rerank=use_rerank,
                 threshold=threshold
@@ -187,37 +186,37 @@ def retrieve_documents(
 
 
 def build_prompt(
-    query: str,
-    documents: List[tuple],
-    system_prompt: Optional[str] = None
+        query: str,
+        documents: List[tuple],
+        system_prompt: Optional[str] = None
 ) -> tuple[str, str]:
-    """
-    构建 Prompt
-
-    :param query: 用户问题
-    :param documents: 检索到的文档列表 [(Document, score), ...]
-    :param system_prompt: 自定义系统提示词
-    :return: (system_message, user_message)
-    """
-    # 使用自定义或默认系统提示词
+    """构建 Prompt"""
     sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
 
-    # 组装参考资料
     context_parts = []
     for i, (doc, score) in enumerate(documents, 1):
-        source = doc.metadata.get('source', 'Unknown')
-        page = doc.metadata.get('page', 'N/A')
+        source = doc.metadata.get('category', 'Unknown')  # 👈 改用 category
+
+        # 👇 处理页码列表
+        page_numbers = doc.metadata.get('page_numbers', [])
+        if isinstance(page_numbers, list) and page_numbers:
+            if len(page_numbers) == 1:
+                page_str = f"第{format_page_numbers(doc.metadata.get('page_numbers'))}页"
+            else:
+                page_str = f"第{page_numbers[0]}-{page_numbers[-1]}页"
+        else:
+            page_str = "页码未知"
+
         content = doc.page_content
 
         context_parts.append(
             f"【参考资料 {i}】\n"
-            f"来源: {source} (第{page}页)\n"
+            f"来源: {source} ({page_str})\n"  # 👈 格式化后的页码
             f"内容: {content}\n"
         )
 
     context = "\n".join(context_parts)
 
-    # 用户消息
     user_message = f"""参考资料：
 {context}
 
@@ -228,7 +227,6 @@ def build_prompt(
 请基于上述参考资料回答问题。"""
 
     return sys_prompt, user_message
-
 
 def generate_answer(
     query: str,
@@ -264,6 +262,31 @@ def generate_answer(
             detail=f"LLM generation failed: {str(e)}"
         )
 
+
+def format_page_numbers(page_numbers) -> str:
+    """
+    格式化页码显示
+
+    :param page_numbers: 页码列表或其他格式
+    :return: 格式化的页码字符串
+
+    示例:
+        [5] -> "5"
+        [3, 4] -> "3-4"
+        [1, 2, 3] -> "1-3"
+        [] -> "N/A"
+    """
+    if not page_numbers:
+        return "N/A"
+
+    if isinstance(page_numbers, list):
+        if len(page_numbers) == 1:
+            return str(page_numbers[0])
+        else:
+            return f"{page_numbers[0]}-{page_numbers[-1]}"
+
+    # 兼容旧数据（如果是单个数字）
+    return str(page_numbers)
 
 # --- 4. 路由 ---
 
@@ -312,9 +335,10 @@ async def chat_query(
         if request.return_sources:
             sources = []
             for doc, score in documents:
+                # 👇 格式化页码
                 sources.append(SourceInfo(
-                    source=doc.metadata.get('source', 'Unknown'),
-                    page=str(doc.metadata.get('page', 'N/A')),
+                    source=doc.metadata.get('category', 'Unknown'),
+                    page=format_page_numbers(doc.metadata.get('page_numbers')),
                     content=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
                     score=float(score)
                 ))
@@ -405,3 +429,32 @@ async def get_model_info(
         available_providers=[p.value for p in ModelProvider],
         temperature=_default_temperature
     )
+
+@router.get("/cache/stats")
+async def get_cache_stats(current_user: User = Depends(get_current_user)):
+    """获取缓存统计"""
+    from src.services.retrieval_service import get_semantic_cache
+
+    cache = get_semantic_cache()
+    if not cache:
+        return {"error": "Cache not initialized"}
+
+    stats = cache.get_cache_stats()
+    return stats
+
+
+@router.delete("/cache/clear")
+async def clear_cache(
+        document_id: Optional[str] = None,
+        current_user: User = Depends(get_current_user)
+):
+    """清空缓存"""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    cache = get_semantic_cache()
+    if not cache:
+        return {"error": "Cache not initialized"}
+
+    cache.clear_cache(document_id)
+    return {"message": "Cache cleared"}
