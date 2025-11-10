@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import List, Optional, Union
 import fitz  # PyMuPDF
 from langchain_core.documents import Document
+from src.loaders.base_loader import BaseDocumentLoader
 from src.processors.semantic_chunker import SemanticChunker
 from src.processors.semantic_chunker import create_semantic_chunker
 
-class PDFLoader:
+class PDFLoader(BaseDocumentLoader):
     """
     PDF 文档加载器
 
@@ -29,8 +30,8 @@ class PDFLoader:
         :param chunker: SemanticChunker 实例
         :param verbose: 是否打印处理信息
         """
+        super().__init__(verbose=verbose)
         self.chunker = chunker
-        self.verbose = verbose
 
     def load(self, file_path: Union[str, Path]) -> List[Document]:
         """
@@ -67,74 +68,13 @@ class PDFLoader:
 
         return documents
 
-    def load_batch(self, file_paths: List[Union[str, Path]]) -> List[Document]:
+    def _get_file_pattern(self) -> str:
         """
-        批量加载多个 PDF 文件
+        返回 PDF 加载器支持的文件模式
 
-        :param file_paths: PDF 文件路径列表
-        :return: 所有文件的 Document 列表
+        :return: 文件模式
         """
-        all_documents = []
-
-        if self.verbose:
-            print(f"\n{'=' * 60}")
-            print(f"开始批量加载 {len(file_paths)} 个PDF文件")
-            print(f"{'=' * 60}\n")
-
-        for i, file_path in enumerate(file_paths, 1):
-            if self.verbose:
-                print(f"[{i}/{len(file_paths)}] ", end="")
-
-            try:
-                docs = self.load(file_path)
-                all_documents.extend(docs)
-            except Exception as e:
-                if self.verbose:
-                    print(f"❌ 加载失败 {Path(file_path).name}: {e}")
-                continue
-
-        if self.verbose:
-            print(f"\n{'=' * 60}")
-            print(f"批量加载完成: 共 {len(all_documents)} 个文档块")
-            print(f"{'=' * 60}\n")
-
-        return all_documents
-
-    def load_directory(
-            self,
-            dir_path: Union[str, Path],
-            recursive: bool = False
-    ) -> List[Document]:
-        """
-        加载目录下的所有 PDF 文件
-
-        :param dir_path: 目录路径
-        :param recursive: 是否递归子目录
-        :return: 所有文件的 Document 列表
-        """
-        dir_path = Path(dir_path)
-
-        if not dir_path.exists():
-            raise FileNotFoundError(f"目录不存在: {dir_path}")
-
-        if not dir_path.is_dir():
-            raise ValueError(f"不是目录: {dir_path}")
-
-        # 查找所有PDF文件
-        if recursive:
-            pdf_files = list(dir_path.rglob("*.pdf"))
-        else:
-            pdf_files = list(dir_path.glob("*.pdf"))
-
-        if not pdf_files:
-            if self.verbose:
-                print(f"⚠️  目录中没有找到PDF文件: {dir_path}")
-            return []
-
-        if self.verbose:
-            print(f"📁 在 {dir_path} 中找到 {len(pdf_files)} 个PDF文件")
-
-        return self.load_batch(pdf_files)
+        return "*.pdf"
 
     def _extract_text(self, file_path: Path) -> List[dict]:
         """

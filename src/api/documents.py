@@ -2,6 +2,7 @@ from fastapi import UploadFile, File, HTTPException, APIRouter, Depends
 from fastapi.responses import JSONResponse
 from langchain_chroma import Chroma
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import re
@@ -18,6 +19,8 @@ from src.services.chroma_cleanup import delete_collection_completely
 from src.services.retrieval_service import retrieve_with_rerank, embedding_model, CHROMA_PERMANENT_DIR
 from src.services.vector_store_cache import vectorstore_cache
 from src.services.usage_limiter import get_usage_limiter
+from src.loaders.pdf_loader import create_pdf_loader
+from src.processors.semantic_chunker import create_semantic_chunker
 
 # 修改router的prefix和tags
 router = APIRouter(
@@ -39,7 +42,8 @@ CHROMA_PERMANENT_DIR.mkdir(exist_ok=True)
 documents_db = {}
 
 
-class Document:
+class DocumentMetadata:
+    """文档元数据存储类（注意：与 LangChain 的 Document 类区别开）"""
     def __init__(self, document_id: str, filename: str, filepath: str,
                  page_count: int, file_size: int, user_id: str):
         self.document_id = document_id
@@ -51,7 +55,7 @@ class Document:
         self.status = "uploaded"
         self.created_at = datetime.now()
         self.text_content = None
-        self.chunks = None
+        self.chunks = None  # List[Document] - LangChain Document 对象列表
         self.chroma_collection_name = None
         self.permanent_collection_name = None  # 正式库collection名称
         self.confirmed_at = None  # 确认时间
@@ -184,56 +188,27 @@ class PermanentDocumentResponse(BaseModel):
 
 # ==================== 工具函数 ====================
 
-def split_text_with_overlap(text: str, chunk_size: int, overlap: int, separator: str) -> List[dict]:
-    """文本分块函数"""
-    chunks = []
-    text_length = len(text)
-    start = 0
-    index = 0
-
-    while start < text_length:
-        end = start + chunk_size
-
-        if end < text_length:
-            search_start = max(start, end - 100)
-            search_end = min(text_length, end + 100)
-            search_text = text[search_start:search_end]
-
-            sep_pos = search_text.rfind(separator)
-            if sep_pos != -1:
-                end = search_start + sep_pos + len(separator)
-        else:
-            end = text_length
-
-        chunk_content = text[start:end].strip()
-
-        if chunk_content:
-            chunk_id = f"chunk_{index}"
-            chunks.append({
-                "chunk_id": chunk_id,
-                "content": chunk_content,
-                "start_pos": start,
-                "end_pos": end,
-                "char_count": len(chunk_content),
-                "index": index
-            })
-            index += 1
-
-        start = end - overlap
-
-        if start >= text_length or (end >= text_length and start == end - overlap):
-            break
-
-    return chunks
+def _get_pdf_loader():
+    """获取 PDFLoader 实例（懒加载）"""
+    return create_pdf_loader(
+        embedding_model=embedding_model,
+        chunk_size=300,
+        chunk_overlap=0.1,
+        base_threshold=0.8,
+        dynamic_threshold=True,
+        window_size=2,
+        verbose=False
+    )
 
 def extract_category_from_chunks(
-        chunks: List[dict],
+        chunks: List[Document],
         max_chunks: int = 3
-) -> str:  # 👈 注意：返回值改为 str，而不是 dict
+) -> str:
     """
     使用 LLM 进行文档分类（返回分类名称字符串）
+    支持 LangChain Document 对象列表
 
-    :param chunks: 文档块列表
+    :param chunks: LangChain Document 对象列表
     :param max_chunks: 使用前几个chunk进行分类
     :return: 分类名称字符串
     """
@@ -241,8 +216,8 @@ def extract_category_from_chunks(
 
     # 提取样本文本（限制长度避免token过多）
     sample_text = "\n".join([
-        f"片段{i + 1}: {chunk['content'][:300]}"  # 每个chunk只取300字
-        for i, chunk in enumerate(chunks[:max_chunks])
+        f"片段{i + 1}: {doc.page_content[:300]}"  # 每个chunk只取300字
+        for i, doc in enumerate(chunks[:max_chunks])
     ])
 
     # System Prompt - 自由分类模式
@@ -360,6 +335,7 @@ async def upload_document(
         with open(filepath, "wb") as f:
             f.write(content)
 
+        # 使用 PyMuPDF 提取文本和页码信息
         doc_pdf = fitz.open(filepath)
         page_count = doc_pdf.page_count
 
@@ -386,12 +362,15 @@ async def upload_document(
             os.remove(filepath)
             raise HTTPException(status_code=400, detail="PDF文件无法提取文本内容")
 
+    except HTTPException:
+        raise
     except Exception as e:
         if filepath.exists():
             os.remove(filepath)
         raise HTTPException(status_code=400, detail=f"PDF文件处理失败: {str(e)}")
 
-    doc = Document(
+    # 创建文档元数据
+    doc = DocumentMetadata(
         document_id=document_id,
         filename=file.filename,
         filepath=str(filepath),
@@ -400,7 +379,7 @@ async def upload_document(
         user_id=current_user.username  # 使用 username
     )
     doc.text_content = text_content
-    doc.page_char_ranges = page_char_ranges  # 👈 保存页码映射
+    doc.page_char_ranges = page_char_ranges  # 保存页码映射
 
     documents_db[document_id] = doc
 
@@ -441,30 +420,53 @@ async def chunk_document(
     if not doc.text_content:
         raise HTTPException(status_code=400, detail="文档没有文本内容")
 
-    if request.overlap >= request.chunk_size:
-        raise HTTPException(status_code=400, detail="overlap不能大于或等于chunk_size")
-
     try:
-        chunks = split_text_with_overlap(
-            text=doc.text_content,
+        # 使用 SemanticChunker 进行语义分块
+        chunker = create_semantic_chunker(
+            embedding_model=embedding_model,
             chunk_size=request.chunk_size,
-            overlap=request.overlap,
-            separator=request.separator
+            chunk_overlap=request.overlap / 100.0 if request.overlap > 1 else request.overlap,  # 转换为比例
+            base_threshold=0.8,
+            dynamic_threshold=True,
+            window_size=2,
+            merge_separator=""
+        )
+
+        # 返回 Document 对象列表
+        lang_chain_documents = chunker.process_text(
+            text=doc.text_content,
+            metadata={
+                "document_id": document_id,
+                "filename": doc.filename,
+                "file_path": doc.filepath
+            }
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"分块失败: {str(e)}")
 
-    # 👇 新增：自动提取分类
-    category = extract_category_from_chunks(chunks, max_chunks=3)
+    # 自动提取分类
+    category = extract_category_from_chunks(lang_chain_documents, max_chunks=3)
 
-    doc.category = category  # 👈 保存分类
-    doc.chunks = chunks
+    doc.category = category
+    doc.chunks = lang_chain_documents  # 保存 LangChain Document 对象列表
     doc.status = "chunked"
+
+    # 转换为 API 响应格式
+    chunk_items = []
+    for i, lc_doc in enumerate(lang_chain_documents):
+        chunk_items.append(ChunkItem(
+            chunk_id=f"chunk_{i}",
+            content=lc_doc.page_content,
+            start_pos=0,  # 语义分块不追踪字符位置
+            end_pos=len(lc_doc.page_content),
+            char_count=len(lc_doc.page_content),
+            index=i
+        ))
 
     return ChunkResponse(
         document_id=document_id,
-        chunks=[ChunkItem(**chunk) for chunk in chunks],
-        total_chunks=len(chunks),
+        chunks=chunk_items,
+        total_chunks=len(lang_chain_documents),
         total_chars=len(doc.text_content),
         chunk_size=request.chunk_size,
         overlap=request.overlap,
@@ -497,24 +499,21 @@ async def vectorize_document(
         except Exception as e:
             print(f"⚠️ 清理旧collection失败（忽略）: {e}")
 
-    chunk_texts = [chunk["content"] for chunk in doc.chunks]
-    chunk_ids = [chunk["chunk_id"] for chunk in doc.chunks]
+    # 从 LangChain Document 对象中提取数据
+    chunk_texts = [chunk.page_content for chunk in doc.chunks]
+    chunk_ids = [f"chunk_{i}" for i in range(len(doc.chunks))]
 
     metadatas = [
         {
-            "chunk_index": chunk["index"],
-            "char_count": chunk["char_count"],
-            "start_pos": chunk["start_pos"],
-            "end_pos": chunk["end_pos"],
-            "page_numbers": ",".join(map(str, get_page_numbers(
-                chunk["start_pos"],
-                chunk["end_pos"],
-                doc.page_char_ranges
-            ))),
+            "chunk_index": i,
+            "char_count": len(chunk.page_content),
+            "start_pos": 0,  # 语义分块不追踪位置
+            "end_pos": len(chunk.page_content),
             "document_id": document_id,
-            "category": doc.category if doc.category else "未分类"
+            "category": doc.category if doc.category else "未分类",
+            **chunk.metadata  # 合并 Document 的元数据
         }
-        for chunk in doc.chunks
+        for i, chunk in enumerate(doc.chunks)
     ]
 
     try:
@@ -664,10 +663,17 @@ async def confirm_document(
         except:
             pass
 
-        # 创建新的正式collection
+        # 创建新的正式collection（带时间戳元数据）
+        now = datetime.now().isoformat()
         permanent_collection = permanent_client.create_collection(
             name=permanent_collection_name,
-            metadata={"hnsw:space": "cosine"}
+            metadata={
+                "hnsw:space": "cosine",
+                "created_at": doc.created_at.isoformat(),
+                "confirmed_at": now,
+                "document_id": document_id,
+                "category": doc.category if doc.category else "未分类"
+            }
         )
 
         # 5. 添加数据到正式库
@@ -720,7 +726,7 @@ async def get_permanent_document(
     - 支持分页查看
     - 返回文本内容和metadata
     """
-    # 验证文档所有权
+    # 验证文档所有权（注意：doc 是 DocumentMetadata 类）
     doc = verify_document_ownership(document_id, current_user.username)
 
     # 检查文档状态

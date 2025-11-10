@@ -22,6 +22,8 @@ class CollectionInfo(BaseModel):
     document_id: str = Field(..., description="文档ID")
     category: str = Field(..., description="文档分类")
     chunk_count: int = Field(..., description="文本块数量")
+    created_at: Optional[str] = Field(default=None, description="创建时间（ISO格式）")
+    confirmed_at: Optional[str] = Field(default=None, description="确认入库时间（ISO格式）")
 
     class Config:
         json_schema_extra = {
@@ -29,7 +31,9 @@ class CollectionInfo(BaseModel):
                 "collection_name": "doc_f1fafd68_947c_49a8_9a27_3eba58d43e72",
                 "document_id": "f1fafd68-947c-49a8-9a27-3eba58d43e72",
                 "category": "劳动合同",
-                "chunk_count": 16
+                "chunk_count": 16,
+                "created_at": "2025-11-10T10:30:45.123456",
+                "confirmed_at": "2025-11-10T10:35:20.654321"
             }
         }
 
@@ -86,6 +90,8 @@ class CollectionDetailResponse(BaseModel):
     page_size: int = Field(..., description="每页数量")
     total_pages: int = Field(..., description="总页数")
     has_more: bool = Field(..., description="是否有下一页")
+    created_at: Optional[str] = Field(default=None, description="创建时间（ISO格式）")
+    confirmed_at: Optional[str] = Field(default=None, description="确认入库时间（ISO格式）")
     timestamp: str = Field(..., description="响应时间戳")
 
     class Config:
@@ -100,6 +106,8 @@ class CollectionDetailResponse(BaseModel):
                 "page_size": 10,
                 "total_pages": 2,
                 "has_more": True,
+                "created_at": "2025-11-10T10:30:45.123456",
+                "confirmed_at": "2025-11-10T10:35:20.654321",
                 "timestamp": "2025-11-07T16:00:00.123456"
             }
         }
@@ -213,11 +221,18 @@ def get_collection_info(client, collection_name: str) -> CollectionInfo:
         # 获取总文档数量
         total_chunks = collection.count()
 
+        # 从 collection 的 metadata 中获取时间戳信息
+        col_metadata = collection.metadata or {}
+        created_at = col_metadata.get('created_at')
+        confirmed_at = col_metadata.get('confirmed_at')
+
         return CollectionInfo(
             collection_name=collection_name,
             document_id=document_id,
             category=category,
-            chunk_count=total_chunks
+            chunk_count=total_chunks,
+            created_at=created_at,
+            confirmed_at=confirmed_at
         )
     except Exception as e:
         raise HTTPException(
@@ -446,6 +461,11 @@ async def get_collection_detail(
         # 计算总页数
         total_pages = (total_chunks + page_size - 1) // page_size
 
+        # 从 collection 的 metadata 中获取时间戳信息
+        col_metadata = collection.metadata or {}
+        created_at = col_metadata.get('created_at')
+        confirmed_at = col_metadata.get('confirmed_at')
+
         return CollectionDetailResponse(
             collection_name=collection_name,
             document_id=document_id,
@@ -456,6 +476,8 @@ async def get_collection_detail(
             page_size=page_size,
             total_pages=total_pages,
             has_more=end_idx < total_chunks,
+            created_at=created_at,
+            confirmed_at=confirmed_at,
             timestamp=datetime.now().isoformat()
         )
 
