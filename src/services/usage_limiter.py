@@ -229,12 +229,24 @@ class UsageLimiter:
     # ==================== 调试工具 ====================
 
     def reset_user_usage(self, user_id: int):
-        """重置用户的使用计数（调试用）"""
+        """重置用户的使用计数（删除今日记录）"""
         upload_key = self._make_upload_key(user_id)
         query_key = self._make_query_key(user_id)
 
         self.redis.delete(upload_key, query_key)
         print(f"🗑️ 已重置用户 {user_id} 的使用计数")
+
+    def reset_limits_to_default(self):
+        """重置限额到 .env 中的默认值 ⭐️ 新增"""
+        default_upload = self.config.DEFAULT_UPLOAD_LIMIT
+        default_query = self.config.DEFAULT_QUERY_LIMIT
+
+        self.redis.set(self.config.REDIS_KEY_CONFIG_UPLOAD, default_upload)
+        self.redis.set(self.config.REDIS_KEY_CONFIG_QUERY, default_query)
+
+        print(f"🔄 已恢复限额到默认值:")
+        print(f"   - 上传限额: {default_upload}")
+        print(f"   - 问答限额: {default_query}")
 
 
 # ==================== 全局实例 ====================

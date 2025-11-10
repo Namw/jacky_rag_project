@@ -17,6 +17,7 @@ from src.api.chat import get_llm
 from src.services.chroma_cleanup import delete_collection_completely
 from src.services.retrieval_service import retrieve_with_rerank, embedding_model, CHROMA_PERMANENT_DIR
 from src.services.vector_store_cache import vectorstore_cache
+from src.services.usage_limiter import get_usage_limiter
 
 # 修改router的prefix和tags
 router = APIRouter(
@@ -121,6 +122,7 @@ class VectorizeResponse(BaseModel):
     total_chunks: int
     embedding_dim: int
     message: str
+    category: str
 
 
 class SearchRequest(BaseModel):
@@ -330,6 +332,15 @@ async def upload_document(
 ):
     """上传PDF文件"""
 
+    # 检查上传限额
+    limiter = get_usage_limiter()
+    can_upload, error_msg = limiter.check_can_upload(current_user.id)
+    if not can_upload:
+        raise HTTPException(
+            status_code=429,
+            detail=error_msg
+        )
+
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="只支持PDF文件")
 
@@ -393,6 +404,10 @@ async def upload_document(
 
     documents_db[document_id] = doc
 
+    # 增加上传计数
+    new_count = limiter.increment_upload(current_user.id)
+    stats = limiter.get_usage_stats(current_user.id)
+
     return JSONResponse(
         status_code=200,
         content={
@@ -401,7 +416,10 @@ async def upload_document(
             "file_size": file_size,
             "page_count": page_count,
             "status": "uploaded",
-            "created_at": doc.created_at.isoformat()
+            "created_at": doc.created_at.isoformat(),
+            "upload_count": new_count,
+            "upload_limit": stats["upload_limit"],
+            "upload_remaining": stats["upload_remaining"]
         }
     )
 
@@ -450,7 +468,7 @@ async def chunk_document(
         total_chars=len(doc.text_content),
         chunk_size=request.chunk_size,
         overlap=request.overlap,
-        category=category  # 👈 返回给前端
+        category=category
     )
 
 
@@ -524,12 +542,12 @@ async def vectorize_document(
         )
 
     doc.status = "vectorized"
-
     return VectorizeResponse(
         document_id=document_id,
         status="vectorized",
         total_chunks=len(doc.chunks),
         embedding_dim=embedding_dim,
+        category=doc.category if doc.category else "未分类",
         message=f"成功向量化 {len(doc.chunks)} 个文本块并存入Chroma临时库"
     )
 

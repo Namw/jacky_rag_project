@@ -11,6 +11,7 @@ from models.model_factory import ModelFactory
 from config.model_config import ModelProvider
 from src.api.auth import get_current_user, User
 from src.services.retrieval_service import retrieve_with_cache
+from src.services.usage_limiter import get_usage_limiter
 from langchain_core.documents import Document
 
 # --- 1. 全局变量和配置 ---
@@ -302,6 +303,15 @@ async def chat_query(
         current_user: User = Depends(get_current_user)
 ):
     """RAG 问答接口 - 使用统一的召回方案"""
+    # 检查问答限额 ⭐️ 新增
+    limiter = get_usage_limiter()
+    can_query, error_msg = limiter.check_can_query(current_user.id)
+    if not can_query:
+        raise HTTPException(
+            status_code=429,
+            detail=error_msg
+        )
+
     try:
         k = request.top_k or _default_top_k
 
@@ -342,6 +352,9 @@ async def chat_query(
                     content=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
                     score=float(score)
                 ))
+
+        # 增加问答计数 ⭐️ 新增
+        limiter.increment_query(current_user.id)
 
         return ChatResponse(
             answer=answer,

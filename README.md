@@ -1,3 +1,336 @@
+# RAG Project API
+
+一个基于 FastAPI 的**检索增强生成（RAG）系统**，支持多个大语言模型提供商，具备语义缓存、使用限额管理和定时任务调度等高级功能。
+
+## 主要特性
+
+- 🤖 **多模型支持** - 支持 DeepSeek、OpenAI、Claude、阿里巴巴通义千问等多个 LLM 提供商
+- 📚 **文档管理** - 支持上传和处理 PDF、Excel 等多种文档格式
+- 🔍 **向量检索** - 基于 ChromaDB 的向量数据库，支持语义相似度搜索
+- ⚡ **语义缓存** - 基于 Redis 的智能缓存，减少重复查询的 API 调用
+- 📊 **使用限额管理** - 内置 API 使用次数和速率限制
+- 🔐 **身份认证** - 基于 JWT 的用户认证和授权
+- 🔄 **定时任务** - APScheduler 支持的定时清理和维护任务
+- 📖 **自动文档** - FastAPI 内置的 Swagger/OpenAPI 文档
+
+## 快速开始
+
+### 前置要求
+
+- Python >= 3.13
+- Redis（用于语义缓存和使用限额管理）
+- 各大模型提供商的 API Key
+
+### 安装
+
+1. **克隆项目**
+```bash
+git clone <repository-url>
+cd jakcy_rag_mcp
+```
+
+2. **安装依赖**
+```bash
+uv sync
+```
+
+3. **配置环境变量**
+
+复制 `.env` 模板文件：
+```bash
+cp .env_copy .env
+```
+
+编辑 `.env` 文件，添加必要的 API Keys：
+```env
+# LLM API Keys
+DEEPSEEK_API_KEY=your_deepseek_api_key
+OPENAI_API_KEY=your_openai_api_key
+ANTHROPIC_API_KEY=your_anthropic_api_key
+DASHSCOPE_API_KEY=your_dashscope_api_key
+
+# JWT 密钥
+JWT_SECRET_KEY=your_secret_key
+
+# Redis 配置
+REDIS_HOST=localhost
+REDIS_PORT=6379
+```
+
+4. **启动应用**
+
+**开发环境（带自动重载）**
+```bash
 uv run uvicorn main:app --reload --port 8000
+```
+
+**生产环境**
+```bash
 uv run uvicorn main:app --port 8000
-lsof -ti:8000 | xargs kill -9 2>/dev/null || true
+```
+
+5. **访问 API 文档**
+
+打开浏览器访问：`http://localhost:8000/docs`
+
+## 项目结构
+
+```
+jakcy_rag_mcp/
+├── main.py                          # 应用入口
+├── pyproject.toml                   # 项目配置和依赖声明
+├── uv.lock                          # 锁定的依赖版本
+├── .env_copy                        # 环境变量模板
+│
+├── config/
+│   └── model_config.py              # 模型配置（支持的 LLM 提供商）
+│
+├── models/
+│   └── model_factory.py             # 模型工厂类
+│
+├── src/
+│   ├── api/                         # FastAPI 路由
+│   │   ├── auth.py                  # 用户认证和授权
+│   │   ├── chat.py                  # 聊天接口
+│   │   ├── documents.py             # 文档管理接口
+│   │   ├── chromadb_lib.py          # 向量库管理
+│   │   └── usage_limits.py          # 使用限额管理
+│   │
+│   ├── services/                    # 业务逻辑层
+│   │   ├── retrieval_service.py     # 检索和语义缓存
+│   │   ├── semantic_cache.py        # 语义相似度缓存实现
+│   │   ├── usage_limiter.py         # 使用限额管理
+│   │   ├── scheduler_service.py     # 定时任务调度
+│   │   └── vector_store_cache.py    # 向量存储缓存
+│   │
+│   ├── loaders/                     # 文档加载器
+│   │   └── document_loader.py       # PDF、Excel 等格式的加载
+│   │
+│   ├── processors/                  # 文本处理
+│   │   └── text_processor.py        # 文本清洗和预处理
+│   │
+│   ├── vectorstore/                 # 向量数据库
+│   │   └── chroma_store.py          # ChromaDB 集成
+│   │
+│   └── tools/                       # 工具函数
+│       └── pdf_handler.py           # PDF 处理工具
+│
+└── tests/                           # 测试文件
+    ├── test_rag_pipeline.py         # RAG 流程测试
+    ├── test_usage_limiter.py        # 使用限额测试
+    └── check_chroma_02.py           # 向量库检查
+```
+
+## API 接口概览
+
+### 认证接口 (`/auth`)
+
+- `POST /auth/register` - 用户注册
+- `POST /auth/login` - 用户登录
+- `POST /auth/refresh` - 刷新 JWT Token
+
+### 文档管理 (`/documents`)
+
+- `POST /documents/upload` - 上传文档
+- `GET /documents/list` - 获取文档列表
+- `DELETE /documents/{doc_id}` - 删除文档
+- `GET /documents/{doc_id}` - 获取文档详情
+
+### 聊天接口 (`/chat`)
+
+- `POST /chat/query` - 发送查询
+- `GET /chat/history` - 获取聊天历史
+
+### 向量库管理 (`/chromadb`)
+
+- `POST /chromadb/clean` - 清理向量库
+- `GET /chromadb/status` - 获取向量库状态
+
+### 使用限额 (`/usage-limits`)
+
+- `GET /usage-limits/stats` - 获取使用统计
+- `GET /usage-limits/remaining` - 获取剩余额度
+
+## 核心功能说明
+
+### 语义缓存
+
+应用启动时会初始化语义缓存服务：
+- **相似度阈值**：0.8（可配置）
+- **缓存过期时间**：5 小时（可配置）
+- 使用 Redis 存储缓存数据
+
+### 使用限额管理
+
+支持两种限制方式：
+- **次数限制**：每用户的 API 调用次数
+- **速率限制**：防止短时间内过多请求
+
+### 支持的模型
+
+| 提供商 | 模型名称 | 环境变量 |
+|-------|---------|---------|
+| DeepSeek | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| OpenAI | `gpt-3.5-turbo` | `OPENAI_API_KEY` |
+| Claude | `claude-3-sonnet-20240229` | `ANTHROPIC_API_KEY` |
+| 通义千问 | `qwen3-coder-plus` | `DASHSCOPE_API_KEY` |
+
+## 开发指南
+
+### 调试技巧
+
+1. **查看实时日志**
+```bash
+uv run uvicorn main:app --reload --port 8000
+```
+
+2. **查看已运行的 API 进程**
+```bash
+lsof -ti:8000
+```
+
+3. **杀死进程**
+```bash
+lsof -ti:8000 | xargs kill -9
+```
+
+### 添加新的 LLM 提供商
+
+1. 在 `config/model_config.py` 中添加模型配置
+2. 在 `models/model_factory.py` 中实现模型工厂逻辑
+3. 更新环境变量文档
+
+### 扩展文档处理能力
+
+在 `src/loaders/document_loader.py` 中添加新的加载器
+
+## 依赖管理
+
+本项目使用 **uv** 作为包管理工具，所有依赖在 `pyproject.toml` 中声明：
+
+```bash
+# 安装依赖
+uv sync
+
+# 添加新依赖
+uv add package-name
+
+# 更新依赖
+uv sync
+```
+
+### 主要依赖
+
+- **FastAPI** - Web 框架
+- **LangChain** - LLM 集成框架
+- **ChromaDB** - 向量数据库
+- **Redis** - 缓存和消息队列
+- **APScheduler** - 定时任务调度
+- **Pydantic** - 数据验证
+- **PyMuPDF** - PDF 处理
+
+## 故障排查
+
+### Redis 连接失败
+
+```
+❌ Redis 连接失败
+⚠️  语义缓存功能将不可用
+```
+
+**解决方案**：确保 Redis 服务已启动
+```bash
+# macOS (使用 Homebrew)
+brew services start redis
+
+# Linux
+sudo systemctl start redis-server
+```
+
+### 端口被占用
+
+```
+❌ Address already in use
+```
+
+**解决方案**：杀死占用端口的进程或更换端口
+```bash
+# 杀死进程
+lsof -ti:8000 | xargs kill -9
+
+# 或使用不同的端口
+uv run uvicorn main:app --port 8001
+```
+
+### 模型 API Key 缺失
+
+**解决方案**：检查 `.env` 文件中是否配置了正确的 API Key
+
+## 性能优化建议
+
+1. **语义缓存** - 启用缓存以减少重复查询的成本
+2. **批量操作** - 使用批量接口处理多个文档
+3. **向量库清理** - 定期清理废弃的文档和向量
+4. **Redis 监控** - 监控 Redis 内存使用情况
+
+## 安全建议
+
+- 🔐 **不要提交 `.env` 文件** - 使用 `.env_copy` 作为模板
+- 🔑 **定期轮换 API Key** - 定期更新各服务的 API Key
+- 🛡️ **启用 HTTPS** - 生产环境必须使用 HTTPS
+- 📝 **审计日志** - 记录所有用户操作
+
+## 部署
+
+### 使用 uv 部署到新环境
+
+```bash
+# 在新服务器上
+git clone <repository-url>
+cd jakcy_rag_mcp
+
+# 安装依赖（会使用 uv.lock 确保版本一致）
+uv sync
+
+# 配置环境变量
+cp .env_copy .env
+# 编辑 .env 文件
+
+# 启动应用
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### Docker 部署
+
+```dockerfile
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# 安装 uv
+RUN pip install uv
+
+# 复制项目文件
+COPY . .
+
+# 安装依赖
+RUN uv sync
+
+# 暴露端口
+EXPOSE 8000
+
+# 启动应用
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+## 贡献指南
+
+欢迎提交 Issue 和 Pull Request！
+
+## 许可证
+
+本项目采用 MIT 许可证
+
+## 联系方式
+
+如有问题，请创建 Issue 或联系项目维护者。

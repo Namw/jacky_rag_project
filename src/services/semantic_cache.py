@@ -66,7 +66,7 @@ class SemanticQueryCache:
 
     def _make_cache_key(
             self,
-            collection_name: str,  # 👈 改为 collection_name
+            collection_name: str,
             top_k: int
     ) -> str:
         """
@@ -79,7 +79,7 @@ class SemanticQueryCache:
     def get(
             self,
             query: str,
-            collection_name: str,  # 👈 改为 collection_name
+            collection_name: str,
             top_k: int,
             use_rerank: bool
     ) -> Optional[List[Tuple[Document, float]]]:
@@ -256,15 +256,30 @@ class SemanticQueryCache:
         try:
             if collection_name:
                 # 清空特定 collection 的缓存
-                pattern = f"{self.QUERY_INDEX_KEY}:{collection_name}:*"
+                index_pattern = f"{self.QUERY_INDEX_KEY}:{collection_name}:*"
+                result_pattern = f"{self.RESULT_KEY_PREFIX}{collection_name}:*"
             else:
                 # 清空所有缓存
-                pattern = f"{self.QUERY_INDEX_KEY}:*"
+                index_pattern = f"{self.QUERY_INDEX_KEY}:*"
+                result_pattern = f"{self.RESULT_KEY_PREFIX}*"
 
-            keys = self.redis.keys(pattern)
-            if keys:
-                self.redis.delete(*keys)
-                print(f"🗑️ 已清空 {len(keys)} 个缓存索引 (collection={collection_name or 'all'})")
+            # 1. 删除索引 keys
+            index_keys = self.redis.keys(index_pattern)
+            index_count = 0
+            if index_keys:
+                index_count = self.redis.delete(*index_keys)
+
+            # 2. 删除结果 keys ⭐️ 新增
+            result_keys = self.redis.keys(result_pattern)
+            result_count = 0
+            if result_keys:
+                result_count = self.redis.delete(*result_keys)
+
+            total_count = index_count + result_count
+            print(f"🗑️ 已清空缓存 (collection={collection_name or 'all'})")
+            print(f"   - 索引: {index_count} 个")
+            print(f"   - 结果: {result_count} 个")
+            print(f"   - 总计: {total_count} 个 Redis keys")
         except Exception as e:
             print(f"⚠️ 清空缓存失败: {e}")
 

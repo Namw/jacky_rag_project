@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from src.api.chat import init_chat_service
 from src.services.retrieval_service import init_semantic_cache
 from src.services.usage_limiter import init_usage_limiter
+from src.services.scheduler_service import init_scheduler, stop_scheduler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -63,6 +64,9 @@ async def lifespan(app: FastAPI):
     # ==================== 4. 初始化使用限额管理器 ====================
     init_usage_limiter(redis_client)
 
+    # ==================== 5. 初始化定时任务调度器 ====================
+    init_scheduler()
+
     print("=" * 60)
     print("🎉 应用启动完成！")
     print("=" * 60)
@@ -75,6 +79,9 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     print("🛑 应用关闭中...")
     print("=" * 60)
+
+    # 停止定时任务
+    stop_scheduler()
 
     if redis_client:
         try:
@@ -89,7 +96,7 @@ async def lifespan(app: FastAPI):
 # 创建 FastAPI 应用
 app = FastAPI(
     title="RAG Project API",
-    description="用于RAG面试项目的后端API",
+    description="RAG项目",
     version="1.0.0",
     lifespan=lifespan
 )

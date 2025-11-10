@@ -7,7 +7,8 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from src.api.auth import get_current_user, User
-from src.services.usage_limiter import get_usage_limiter
+from src.services.usage_limiter import get_usage_limiter, UsageLimitsConfig
+
 router = APIRouter(
     prefix="/api/usage",
     tags=["UsageLimits"]
@@ -145,7 +146,7 @@ async def update_limits(
         )
 
     # 2. 验证管理密码
-    if request.admin_password != usage_limits_config.LIMITS_ADMIN_PASSWORD:
+    if request.admin_password != UsageLimitsConfig.LIMITS_ADMIN_PASSWORD:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="管理密码错误"
@@ -178,15 +179,22 @@ async def reset_usage(
         current_user: User = Depends(get_current_user)
 ):
     """
-    重置用户的使用计数（需要管理员 + 特殊密码）
+    重置用户的使用计数和限额配置（需要管理员 + 特殊密码）
 
     **权限要求：**
     - 必须是 admin 角色
     - 必须提供正确的管理密码
 
     **功能：**
-    - 如果提供 user_id：重置指定用户的今日计数
-    - 如果不提供 user_id：重置自己的今日计数
+    - 重置用户的今日计数（上传和问答都变为 0）
+    - 恢复限额配置到 .env 中的默认值
+    - 如果提供 user_id：重置指定用户
+    - 如果不提供 user_id：重置自己
+
+    **重置内容：** ⭐️ 新增
+    - 清除用户的上传计数
+    - 清除用户的问答计数
+    - 恢复全局限额到默认值（DAILY_UPLOAD_LIMIT、DAILY_QUERY_LIMIT）
     """
     # 1. 检查是否是 admin
     if current_user.role != "admin":
@@ -196,7 +204,7 @@ async def reset_usage(
         )
 
     # 2. 验证管理密码
-    if request.admin_password != usage_limits_config.LIMITS_ADMIN_PASSWORD:
+    if request.admin_password != UsageLimitsConfig.LIMITS_ADMIN_PASSWORD:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="管理密码错误"
@@ -205,14 +213,23 @@ async def reset_usage(
     # 3. 确定要重置的用户
     target_user_id = request.user_id if request.user_id else current_user.id
 
-    # 4. 重置计数
+    # 4. 重置计数和限额
     try:
         limiter = get_usage_limiter()
+
+        # 重置指定用户的计数
         limiter.reset_user_usage(target_user_id)
 
+        # 恢复全局限额到默认值 ⭐️ 新增
+        limiter.reset_limits_to_default()
+
         return {
-            "message": f"已重置用户 {target_user_id} 的使用计数",
-            "user_id": target_user_id
+            "message": f"已重置用户 {target_user_id} 的使用计数并恢复全局限额到默认值",
+            "user_id": target_user_id,
+            "reset_limits": {
+                "upload_limit": limiter.get_upload_limit(),
+                "query_limit": limiter.get_query_limit()
+            }
         }
 
     except Exception as e:
@@ -220,30 +237,3 @@ async def reset_usage(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"重置失败: {str(e)}"
         )
-
-
-@router.get("/health")
-async def check_limits_health():
-    """
-    限额系统健康检查（无需认证）
-
-    检查限额管理器是否正常工作
-    """
-    try:
-        limiter = get_usage_limiter()
-
-        # 尝试获取配置
-        upload_limit = limiter.get_upload_limit()
-        query_limit = limiter.get_query_limit()
-
-        return {
-            "status": "healthy",
-            "upload_limit": upload_limit,
-            "query_limit": query_limit
-        }
-
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
