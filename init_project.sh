@@ -26,10 +26,8 @@ echo "✅ 已重置 $ENV_FILE（来源：$ENV_TEMPLATE）"
 
 echo
 echo "请依次输入以下 5 个配置值："
-read -r -s -p "JWT_SECRET_KEY=" JWT_SECRET_KEY
-printf "\n"
-read -r -s -p "LIMITS_ADMIN_PASSWORD=" LIMITS_ADMIN_PASSWORD
-printf "\n"
+read -r -p "JWT_SECRET_KEY=" JWT_SECRET_KEY
+read -r -p "LIMITS_ADMIN_PASSWORD=" LIMITS_ADMIN_PASSWORD
 read -r -p "DASHSCOPE_API_KEY=" DASHSCOPE_API_KEY
 read -r -p "OPENAI_API_KEY=" OPENAI_API_KEY
 read -r -p "DEEPSEEK_API_KEY=" DEEPSEEK_API_KEY
