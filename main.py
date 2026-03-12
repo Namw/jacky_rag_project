@@ -12,6 +12,8 @@ from src.api.chat import init_chat_service
 from src.services.retrieval_service import init_semantic_cache
 from src.services.usage_limiter import init_usage_limiter
 from src.services.scheduler_service import init_scheduler, stop_scheduler
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -117,6 +119,9 @@ app.include_router(chat.router)
 app.include_router(chromadb_lib.router)
 app.include_router(usage_limits.router)
 
+# 挂载前端静态文件（必须是最后一行）
+dist_path = Path(__file__).parent / "dist"
+app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="static")
 
 @app.get("/")
 def read_root():
