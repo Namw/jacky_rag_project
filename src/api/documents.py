@@ -30,13 +30,13 @@ router = APIRouter(
 
 # 配置
 UPLOAD_DIR = Path("data/uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 # Chroma存储路径
 CHROMA_TEMP_DIR = Path("data/vectorstore/temp")  # 临时库
-CHROMA_TEMP_DIR.mkdir(exist_ok=True)
-CHROMA_PERMANENT_DIR.mkdir(exist_ok=True)
+CHROMA_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+CHROMA_PERMANENT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 简单的内存存储（生产环境应该用数据库）
 documents_db = {}

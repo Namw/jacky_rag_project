@@ -117,6 +117,8 @@ uv run uvicorn main:app --reload --port 8000
 **生产环境**
 ```bash
 uv run uvicorn main:app --port 8000
+
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 5. **访问 API 文档**
