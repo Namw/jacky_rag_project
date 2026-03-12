@@ -118,7 +118,12 @@ uv run uvicorn main:app --reload --port 8000
 ```bash
 uv run uvicorn main:app --port 8000
 
-uv run uvicorn main:app --host 0.0.0.0 --port 8000
+nohup uv run uvicorn main:app --host 0.0.0.0 --port 8000 > ./log/app.log 2>&1 &
+
+nohup      忽略终端关闭
+> app.log  stdout日志
+2>&1       stderr日志
+&          后台运行
 ```
 
 5. **访问 API 文档**
