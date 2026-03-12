@@ -25,15 +25,17 @@ cp "$ENV_TEMPLATE" "$ENV_FILE"
 echo "✅ 已重置 $ENV_FILE（来源：$ENV_TEMPLATE）"
 
 echo
-echo "请依次输入以下 4 个配置值："
+echo "请依次输入以下 5 个配置值："
+read -r -s -p "JWT_SECRET_KEY=" JWT_SECRET_KEY
+printf "\n"
 read -r -s -p "LIMITS_ADMIN_PASSWORD=" LIMITS_ADMIN_PASSWORD
 printf "\n"
 read -r -p "DASHSCOPE_API_KEY=" DASHSCOPE_API_KEY
 read -r -p "OPENAI_API_KEY=" OPENAI_API_KEY
 read -r -p "DEEPSEEK_API_KEY=" DEEPSEEK_API_KEY
 
-if [[ -z "$LIMITS_ADMIN_PASSWORD" || -z "$DASHSCOPE_API_KEY" || -z "$OPENAI_API_KEY" || -z "$DEEPSEEK_API_KEY" ]]; then
-  echo "❌ 4 个配置都不能为空。"
+if [[ -z "$JWT_SECRET_KEY" || -z "$LIMITS_ADMIN_PASSWORD" || -z "$DASHSCOPE_API_KEY" || -z "$OPENAI_API_KEY" || -z "$DEEPSEEK_API_KEY" ]]; then
+  echo "❌ 5 个配置都不能为空。"
   exit 1
 fi
 
@@ -58,12 +60,13 @@ set_env_var() {
   fi
 }
 
+set_env_var "JWT_SECRET_KEY" "$JWT_SECRET_KEY"
 set_env_var "LIMITS_ADMIN_PASSWORD" "$LIMITS_ADMIN_PASSWORD"
 set_env_var "DASHSCOPE_API_KEY" "$DASHSCOPE_API_KEY"
 set_env_var "OPENAI_API_KEY" "$OPENAI_API_KEY"
 set_env_var "DEEPSEEK_API_KEY" "$DEEPSEEK_API_KEY"
 
-echo "✅ 已写入 4 个关键配置到 $ENV_FILE"
+echo "✅ 已写入 5 个关键配置到 $ENV_FILE"
 
 # 3) 检查并创建 log 目录和 app.log
 mkdir -p "$LOG_DIR"

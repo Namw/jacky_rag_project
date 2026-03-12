@@ -126,6 +126,25 @@ nohup      忽略终端关闭
 &          后台运行
 ```
 
+**推荐：使用脚本初始化并启动（已拆分）**
+```bash
+# 先初始化项目（会重置 .env，并交互输入 5 个关键配置）
+./init_project.sh
+
+# 再启动服务
+./start_server.sh
+
+# 或者一键执行初始化 + 启动
+./start.sh
+```
+
+`./init_project.sh` 会提示输入以下 5 个值并写入 `.env`：
+- `JWT_SECRET_KEY`
+- `LIMITS_ADMIN_PASSWORD`
+- `DASHSCOPE_API_KEY`
+- `OPENAI_API_KEY`
+- `DEEPSEEK_API_KEY`
+
 5. **访问 API 文档**
 
 打开浏览器访问：`http://localhost:8000/docs`
