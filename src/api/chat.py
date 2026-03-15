@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Tuple
 from datetime import datetime
@@ -436,6 +439,42 @@ def format_page_numbers(page_numbers) -> str:
     # 兼容旧数据（如果是单个数字）
     return str(page_numbers)
 
+
+def _extract_chunk_text(chunk) -> str:
+    """提取流式 chunk 的文本内容"""
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "".join(parts)
+
+    return str(content) if content else ""
+
+
+def _format_sse_event(event: str, data: dict) -> str:
+    """格式化 SSE 事件"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _build_sources(documents: List[tuple]) -> List[SourceInfo]:
+    """构建来源信息"""
+    sources = []
+    for doc, score in documents:
+        sources.append(SourceInfo(
+            source=doc.metadata.get('category', 'Unknown'),
+            page=format_page_numbers(doc.metadata.get('page_numbers')),
+            content=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+            score=float(score)
+        ))
+    return sources
+
 # --- 4. 路由 ---
 
 router = APIRouter(
@@ -614,10 +653,24 @@ async def list_chat_session_messages(
     return SessionMessagesResponse(session_id=session_id, messages=parsed_messages)
 
 
-@router.post("/sessions/{session_id}/messages", response_model=SessionMessageResponse)
+@router.post(
+    "/sessions/{session_id}/messages",
+    response_model=SessionMessageResponse,
+    responses={
+        200: {
+            "description": "普通 JSON 或 SSE 流式响应",
+            "content": {
+                "application/json": {},
+                "text/event-stream": {}
+            }
+        }
+    }
+)
 async def send_session_message(
         session_id: str,
         request: SessionMessageRequest,
+        http_request: Request,
+        stream: bool = Query(False, description="是否开启 SSE 流式响应"),
         current_user: User = Depends(get_current_user)
 ):
     """发送会话消息（多轮 + 上下文记忆）"""
@@ -630,6 +683,132 @@ async def send_session_message(
     session = store.get_session(current_user.id, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if stream:
+        async def event_generator():
+            try:
+                k = request.top_k or _default_top_k
+
+                documents = retrieve_documents(
+                    document_id=session.get("document_id"),
+                    query=request.question,
+                    k=k,
+                    use_rerank=request.use_rerank,
+                    threshold=request.threshold
+                )
+
+                if not documents:
+                    store.append_message(
+                        user_id=current_user.id,
+                        session_id=session_id,
+                        role="user",
+                        content=request.question
+                    )
+                    no_answer = "抱歉，没有找到相关的参考资料。"
+                    assistant_message = store.append_message(
+                        user_id=current_user.id,
+                        session_id=session_id,
+                        role="assistant",
+                        content=no_answer,
+                        sources=None
+                    )
+                    limiter.increment_query(current_user.id)
+
+                    yield _format_sse_event("message", {"delta": no_answer})
+                    yield _format_sse_event("done", {
+                        "session_id": session_id,
+                        "answer": no_answer,
+                        "question": request.question,
+                        "sources": None,
+                        "timestamp": assistant_message["timestamp"],
+                        "model_provider": _current_provider.value
+                    })
+                    return
+
+                history_messages = store.list_messages(current_user.id, session_id, limit=10)
+                sys_msg, user_msg = build_prompt_with_history(
+                    query=request.question,
+                    documents=documents,
+                    history_messages=history_messages,
+                    system_prompt=session.get("system_prompt")
+                )
+
+                messages = [
+                    SystemMessage(content=sys_msg),
+                    HumanMessage(content=user_msg)
+                ]
+
+                yield _format_sse_event("start", {
+                    "session_id": session_id,
+                    "question": request.question,
+                    "model_provider": _current_provider.value
+                })
+
+                answer_chunks = []
+                llm = get_llm()
+                for chunk in llm.stream(messages):
+                    if await http_request.is_disconnected():
+                        return
+
+                    delta = _extract_chunk_text(chunk)
+                    if not delta:
+                        continue
+
+                    answer_chunks.append(delta)
+                    yield _format_sse_event("message", {"delta": delta})
+
+                answer = "".join(answer_chunks).strip()
+                if not answer:
+                    answer = "（模型未返回内容）"
+
+                sources = None
+                if request.return_sources:
+                    sources = _build_sources(documents)
+
+                source_dicts = [item.model_dump() for item in sources] if sources else None
+
+                store.append_message(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    role="user",
+                    content=request.question
+                )
+                assistant_message = store.append_message(
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    role="assistant",
+                    content=answer,
+                    sources=source_dicts
+                )
+
+                limiter.increment_query(current_user.id)
+
+                if source_dicts is not None:
+                    yield _format_sse_event("sources", {"sources": source_dicts})
+
+                yield _format_sse_event("done", {
+                    "session_id": session_id,
+                    "answer": answer,
+                    "question": request.question,
+                    "sources": source_dicts,
+                    "timestamp": assistant_message["timestamp"],
+                    "model_provider": _current_provider.value
+                })
+
+            except HTTPException as e:
+                yield _format_sse_event("error", {"detail": e.detail})
+            except Exception as e:
+                yield _format_sse_event("error", {"detail": f"Session query failed: {str(e)}"})
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
 
     try:
         k = request.top_k or _default_top_k
@@ -679,14 +858,7 @@ async def send_session_message(
 
         sources = None
         if request.return_sources:
-            sources = []
-            for doc, score in documents:
-                sources.append(SourceInfo(
-                    source=doc.metadata.get('category', 'Unknown'),
-                    page=format_page_numbers(doc.metadata.get('page_numbers')),
-                    content=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
-                    score=float(score)
-                ))
+            sources = _build_sources(documents)
 
         source_dicts = [item.model_dump() for item in sources] if sources else None
 
