@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from src.api.chat import init_chat_service
 from src.services.retrieval_service import init_semantic_cache
 from src.services.usage_limiter import init_usage_limiter
+from src.services.chat_session_store import init_chat_session_store
 from src.services.scheduler_service import init_scheduler, stop_scheduler
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -66,7 +67,10 @@ async def lifespan(app: FastAPI):
     # ==================== 4. 初始化使用限额管理器 ====================
     init_usage_limiter(redis_client)
 
-    # ==================== 5. 初始化定时任务调度器 ====================
+    # ==================== 5. 初始化会话存储 ====================
+    init_chat_session_store(redis_client)
+
+    # ==================== 6. 初始化定时任务调度器 ====================
     init_scheduler()
 
     print("=" * 60)

@@ -12,6 +12,7 @@ from config.model_config import ModelProvider
 from src.api.auth import get_current_user, User
 from src.services.retrieval_service import retrieve_with_cache
 from src.services.usage_limiter import get_usage_limiter
+from src.services.chat_session_store import get_chat_session_store
 from langchain_core.documents import Document
 
 # --- 1. 全局变量和配置 ---
@@ -140,6 +141,63 @@ class ModelInfo(BaseModel):
     temperature: float = Field(..., description="当前温度设置")
 
 
+class SessionCreateRequest(BaseModel):
+    """创建会话请求"""
+    title: Optional[str] = Field(None, description="会话标题")
+    document_id: Optional[str] = Field(None, description="文档ID，为空则检索所有文档")
+    system_prompt: Optional[str] = Field(None, description="会话级系统提示词")
+
+
+class ChatSessionInfo(BaseModel):
+    """会话信息"""
+    session_id: str
+    title: str
+    document_id: Optional[str] = None
+    system_prompt: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class SessionMessageRequest(BaseModel):
+    """会话消息请求"""
+    question: str = Field(..., min_length=1, max_length=1000)
+    top_k: Optional[int] = Field(None, ge=1, le=20)
+    use_rerank: bool = Field(False, description="是否启用 rerank")
+    threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
+    return_sources: bool = Field(True)
+
+
+class ChatMessage(BaseModel):
+    """消息记录"""
+    message_id: str
+    role: str
+    content: str
+    timestamp: str
+    sources: Optional[List[SourceInfo]] = None
+
+
+class SessionMessagesResponse(BaseModel):
+    """会话消息列表响应"""
+    session_id: str
+    messages: List[ChatMessage]
+
+
+class SessionMessageResponse(BaseModel):
+    """发送会话消息响应"""
+    session_id: str
+    answer: str
+    question: str
+    sources: Optional[List[SourceInfo]] = None
+    timestamp: str
+    model_provider: str
+
+
+class SessionDetailResponse(BaseModel):
+    """会话详情响应"""
+    session: ChatSessionInfo
+    messages: List[ChatMessage]
+
+
 
 # --- 3. 核心功能函数 ---
 def retrieve_documents(
@@ -229,6 +287,64 @@ def build_prompt(
 
     return sys_prompt, user_message
 
+
+def build_prompt_with_history(
+        query: str,
+        documents: List[tuple],
+        history_messages: List[dict],
+        system_prompt: Optional[str] = None
+) -> tuple[str, str]:
+    """构建包含多轮历史的 Prompt"""
+    sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+
+    context_parts = []
+    for i, (doc, score) in enumerate(documents, 1):
+        source = doc.metadata.get('category', 'Unknown')
+
+        page_numbers = doc.metadata.get('page_numbers', [])
+        if isinstance(page_numbers, list) and page_numbers:
+            if len(page_numbers) == 1:
+                page_str = f"第{format_page_numbers(doc.metadata.get('page_numbers'))}页"
+            else:
+                page_str = f"第{page_numbers[0]}-{page_numbers[-1]}页"
+        else:
+            page_str = "页码未知"
+
+        content = doc.page_content
+
+        context_parts.append(
+            f"【参考资料 {i}】\n"
+            f"来源: {source} ({page_str})\n"
+            f"内容: {content}\n"
+        )
+
+    context = "\n".join(context_parts)
+
+    history_parts = []
+    for item in history_messages:
+        role = item.get("role", "user")
+        role_name = "用户" if role == "user" else "助手"
+        content = item.get("content", "")
+        history_parts.append(f"{role_name}: {content}")
+
+    history_text = "\n".join(history_parts) if history_parts else "（无历史对话）"
+
+    user_message = f"""历史对话：
+{history_text}
+
+---
+
+参考资料：
+{context}
+
+---
+
+用户当前问题：{query}
+
+请基于历史对话与参考资料回答问题。"""
+
+    return sys_prompt, user_message
+
 def generate_answer(
     query: str,
     documents: List[tuple],
@@ -257,6 +373,37 @@ def generate_answer(
         response = llm.invoke(messages)
         answer = response.content
         return answer
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"LLM generation failed: {str(e)}"
+        )
+
+
+def generate_answer_with_history(
+    query: str,
+    documents: List[tuple],
+    history_messages: List[dict],
+    system_prompt: Optional[str] = None
+) -> str:
+    """生成多轮会话答案"""
+    llm = get_llm()
+
+    sys_msg, user_msg = build_prompt_with_history(
+        query=query,
+        documents=documents,
+        history_messages=history_messages,
+        system_prompt=system_prompt
+    )
+
+    messages = [
+        SystemMessage(content=sys_msg),
+        HumanMessage(content=user_msg)
+    ]
+
+    try:
+        response = llm.invoke(messages)
+        return response.content
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -371,6 +518,223 @@ async def chat_query(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Query failed: {str(e)}"
         )
+
+
+@router.post("/sessions", response_model=ChatSessionInfo)
+async def create_chat_session(
+        request: SessionCreateRequest,
+        current_user: User = Depends(get_current_user)
+):
+    """创建会话"""
+    store = get_chat_session_store()
+    session = store.create_session(
+        user_id=current_user.id,
+        title=request.title,
+        document_id=request.document_id,
+        system_prompt=request.system_prompt
+    )
+    return ChatSessionInfo(**session)
+
+
+@router.get("/sessions", response_model=List[ChatSessionInfo])
+async def list_chat_sessions(
+        current_user: User = Depends(get_current_user)
+):
+    """会话列表"""
+    store = get_chat_session_store()
+    sessions = store.list_sessions(current_user.id)
+    return [ChatSessionInfo(**item) for item in sessions]
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
+async def get_chat_session_detail(
+        session_id: str,
+        current_user: User = Depends(get_current_user)
+):
+    """获取会话详情"""
+    store = get_chat_session_store()
+
+    session = store.get_session(current_user.id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    messages = store.list_messages(current_user.id, session_id)
+
+    parsed_messages = []
+    for item in messages:
+        source_items = item.get("sources") or None
+        sources = None
+        if source_items:
+            sources = [SourceInfo(**src) for src in source_items]
+
+        parsed_messages.append(ChatMessage(
+            message_id=item["message_id"],
+            role=item["role"],
+            content=item["content"],
+            timestamp=item["timestamp"],
+            sources=sources
+        ))
+
+    return SessionDetailResponse(
+        session=ChatSessionInfo(**session),
+        messages=parsed_messages
+    )
+
+
+@router.get("/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
+async def list_chat_session_messages(
+        session_id: str,
+        limit: int = 50,
+        current_user: User = Depends(get_current_user)
+):
+    """获取会话消息列表"""
+    store = get_chat_session_store()
+
+    session = store.get_session(current_user.id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    messages = store.list_messages(current_user.id, session_id, limit=limit)
+
+    parsed_messages = []
+    for item in messages:
+        source_items = item.get("sources") or None
+        sources = None
+        if source_items:
+            sources = [SourceInfo(**src) for src in source_items]
+
+        parsed_messages.append(ChatMessage(
+            message_id=item["message_id"],
+            role=item["role"],
+            content=item["content"],
+            timestamp=item["timestamp"],
+            sources=sources
+        ))
+
+    return SessionMessagesResponse(session_id=session_id, messages=parsed_messages)
+
+
+@router.post("/sessions/{session_id}/messages", response_model=SessionMessageResponse)
+async def send_session_message(
+        session_id: str,
+        request: SessionMessageRequest,
+        current_user: User = Depends(get_current_user)
+):
+    """发送会话消息（多轮 + 上下文记忆）"""
+    limiter = get_usage_limiter()
+    can_query, error_msg = limiter.check_can_query(current_user.id)
+    if not can_query:
+        raise HTTPException(status_code=429, detail=error_msg)
+
+    store = get_chat_session_store()
+    session = store.get_session(current_user.id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        k = request.top_k or _default_top_k
+        print(f'document_id:{session.get("document_id")}')
+        documents = retrieve_documents(
+            document_id=session.get("document_id"),
+            query=request.question,
+            k=k,
+            use_rerank=request.use_rerank,
+            threshold=request.threshold
+        )
+
+        if not documents:
+            store.append_message(
+                user_id=current_user.id,
+                session_id=session_id,
+                role="user",
+                content=request.question
+            )
+            no_answer = "抱歉，没有找到相关的参考资料。"
+            store.append_message(
+                user_id=current_user.id,
+                session_id=session_id,
+                role="assistant",
+                content=no_answer,
+                sources=None
+            )
+
+            limiter.increment_query(current_user.id)
+
+            return SessionMessageResponse(
+                session_id=session_id,
+                answer=no_answer,
+                question=request.question,
+                sources=None,
+                timestamp=datetime.now().isoformat(),
+                model_provider=_current_provider.value
+            )
+
+        history_messages = store.list_messages(current_user.id, session_id, limit=10)
+        answer = generate_answer_with_history(
+            query=request.question,
+            documents=documents,
+            history_messages=history_messages,
+            system_prompt=session.get("system_prompt")
+        )
+
+        sources = None
+        if request.return_sources:
+            sources = []
+            for doc, score in documents:
+                sources.append(SourceInfo(
+                    source=doc.metadata.get('category', 'Unknown'),
+                    page=format_page_numbers(doc.metadata.get('page_numbers')),
+                    content=doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                    score=float(score)
+                ))
+
+        source_dicts = [item.model_dump() for item in sources] if sources else None
+
+        store.append_message(
+            user_id=current_user.id,
+            session_id=session_id,
+            role="user",
+            content=request.question
+        )
+        assistant_message = store.append_message(
+            user_id=current_user.id,
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            sources=source_dicts
+        )
+
+        limiter.increment_query(current_user.id)
+
+        return SessionMessageResponse(
+            session_id=session_id,
+            answer=answer,
+            question=request.question,
+            sources=sources,
+            timestamp=assistant_message["timestamp"],
+            model_provider=_current_provider.value
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Session query failed: {str(e)}"
+        )
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_chat_session(
+        session_id: str,
+        current_user: User = Depends(get_current_user)
+):
+    """删除会话"""
+    store = get_chat_session_store()
+    deleted = store.delete_session(current_user.id, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"message": "Session deleted"}
 
 @router.post("/switch-model")
 async def switch_model(
